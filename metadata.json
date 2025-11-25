@@ -1,0 +1,5 @@
+{
+  "name": "AutoScript.NET IDE",
+  "description": "A lightweight, web-based IDE for developing .NET Core automation scripts with integrated Modbus TCP support and AI coding assistance.",
+  "requestFramePermissions": []
+}
