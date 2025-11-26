@@ -1,18 +1,19 @@
+
 import React, { useState, useEffect, useRef } from 'react';
-import { MessageSquare, Send, Sparkles, X } from 'lucide-react';
-import { ChatMessage } from '../types';
-import { generateCodeAssistance } from '../services/geminiService';
+import { MessageSquare, Send, Sparkles, X, Wand2 } from 'lucide-react';
+import { ChatMessage, AutomationProject } from '../types';
+import { generateAutomationConfig } from '../services/geminiService';
 
 interface AIAssistantProps {
-  currentCode: string;
-  onCodeGenerated: (code: string) => void;
+  currentProject: AutomationProject;
+  onConfigGenerated: (config: Partial<AutomationProject>) => void;
   visible: boolean;
   onClose: () => void;
 }
 
 export const AIAssistant: React.FC<AIAssistantProps> = ({ 
-  currentCode, 
-  onCodeGenerated,
+  currentProject, 
+  onConfigGenerated,
   visible,
   onClose
 }) => {
@@ -21,7 +22,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({
     {
       id: '1',
       role: 'model',
-      text: 'Hello! I am your Modbus .NET expert. I can help you write code to read registers, write coils, or handle connection logic. What do you need?'
+      text: 'Hello! I am AutoFlow AI. I can help you design automation systems instantly.\n\nTry asking:\n• "Create a 5x4 Tray for Output Parts"\n• "Add a start button and a status light"\n• "Read register 4001 and show it on a gauge"'
     }
   ]);
   const [isTyping, setIsTyping] = useState(false);
@@ -44,17 +45,29 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({
     setInput('');
     setIsTyping(true);
 
-    // Call API
-    const responseText = await generateCodeAssistance(userMsg.text, currentCode);
+    try {
+        const generatedConfig = await generateAutomationConfig(userMsg.text, currentProject);
+        
+        const modelMsg: ChatMessage = {
+            id: (Date.now() + 1).toString(),
+            role: 'model',
+            text: `I've designed a solution with ${generatedConfig.logicSteps?.length || 0} logic steps and ${generatedConfig.uiWidgets?.length || 0} UI widgets. Click apply to visualize it.`
+        };
+        setMessages(prev => [...prev, modelMsg]);
+        
+        // Save the config to a temporary state or pass it via callback immediately if preferred
+        // Here we attach it to the message object conceptually or just handle via UI button
+        (modelMsg as any).config = generatedConfig;
 
-    const modelMsg: ChatMessage = {
-      id: (Date.now() + 1).toString(),
-      role: 'model',
-      text: responseText
-    };
-
-    setMessages(prev => [...prev, modelMsg]);
-    setIsTyping(false);
+    } catch (e) {
+        setMessages(prev => [...prev, {
+            id: Date.now().toString(),
+            role: 'model',
+            text: "Sorry, I encountered an error generating the automation configuration."
+        }]);
+    } finally {
+        setIsTyping(false);
+    }
   };
 
   if (!visible) return null;
@@ -65,7 +78,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({
       <div className="p-3 border-b border-[#3e3e42] flex justify-between items-center bg-[#252526]">
         <div className="flex items-center gap-2 font-semibold text-sm text-purple-400">
           <Sparkles size={16} />
-          <span>Gemini Copilot</span>
+          <span>AutoFlow AI</span>
         </div>
         <button onClick={onClose} className="text-gray-400 hover:text-white">
           <X size={16} />
@@ -88,12 +101,15 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({
             >
               {msg.text}
             </div>
-            {msg.role === 'model' && msg.text.includes('class') && (
+            
+            {/* Apply Button for Generated Configs */}
+            {msg.role === 'model' && (msg as any).config && (
                <button 
-                onClick={() => onCodeGenerated(msg.text)} // Simple approach: just replace code or append
-                className="mt-2 text-xs text-green-400 hover:text-green-300 underline cursor-pointer"
+                onClick={() => onConfigGenerated((msg as any).config)}
+                className="mt-2 flex items-center gap-2 bg-purple-900/50 hover:bg-purple-900 border border-purple-500/30 text-purple-200 px-3 py-1.5 rounded text-xs transition-colors"
                >
-                 Insert Code to Editor
+                 <Wand2 size={12} />
+                 Apply generated Logic & UI
                </button>
             )}
           </div>
@@ -116,7 +132,7 @@ export const AIAssistant: React.FC<AIAssistantProps> = ({
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-            placeholder="Ask for Modbus logic..."
+            placeholder="Describe your automation task..."
             className="w-full bg-[#3c3c3c] text-white text-sm rounded-md py-2 pl-3 pr-10 focus:outline-none focus:ring-1 focus:ring-blue-500 border border-[#555]"
           />
           <button 

@@ -1,5 +1,5 @@
 {
-  "name": "AutoScript.NET IDE",
-  "description": "A lightweight, web-based IDE for developing .NET Core automation scripts with integrated Modbus TCP support and AI coding assistance.",
+  "name": "AutoFlow Studio",
+  "description": "A low-code industrial automation platform. Build HMI and Logic control systems using visual tools and AI, featuring built-in Modbus TCP support.",
   "requestFramePermissions": []
 }

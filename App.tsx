@@ -1,52 +1,97 @@
-import React, { useState, useEffect } from 'react';
+
+import React, { useState, useEffect, useRef } from 'react';
 import { Sidebar } from './components/Sidebar';
-import { Editor } from './components/Editor';
+import { VisualEditor } from './components/Editor';
 import { Console } from './components/Console';
 import { AIAssistant } from './components/AIAssistant';
-import { ModbusConfig, LogEntry, LogLevel } from './types';
+import { ModbusConfig, LogEntry, LogLevel, AutomationProject, LogicStep, StepType, WidgetType } from './types';
 import { PanelRightOpen } from 'lucide-react';
 
-const INITIAL_CODE = `using System;
-using System.Net.Sockets;
-using NModbus;
-
-namespace AutoScript
-{
-    class Program
+const INITIAL_PROJECT: AutomationProject = {
+  logicSteps: [
+    { 
+      id: '1', 
+      type: 'MODBUS_READ', 
+      name: 'Scan Sensors', 
+      params: { address: 4001, count: 20, storeToVar: 'trayData' } 
+    },
     {
-        static void Main(string[] args)
-        {
-            try 
-            {
-                // Configure connection
-                using (TcpClient client = new TcpClient("127.0.0.1", 502))
-                {
-                    var factory = new ModbusFactory();
-                    IModbusMaster master = factory.CreateMaster(client);
-                    
-                    Console.WriteLine("Connected to Modbus Slave...");
-
-                    // Read Holding Registers (Start Addr: 100, Count: 5)
-                    ushort startAddress = 100;
-                    ushort numInputs = 5;
-                    ushort[] inputs = master.ReadHoldingRegisters(1, startAddress, numInputs);
-
-                    for (int i = 0; i < numInputs; i++)
-                    {
-                        Console.WriteLine($"Register {startAddress + i}: {inputs[i]}");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Error: {ex.Message}");
-            }
-        }
+      id: '2',
+      type: 'DELAY',
+      name: 'Wait Cycle',
+      params: { ms: 1000 }
     }
-}`;
+  ],
+  scripts: [
+    {
+      id: 'scr_fill',
+      name: 'FillRandom',
+      lastModified: Date.now(),
+      content: `// Simulate adding parts to the tray
+log("Adding part to tray...");
+const tray = variables.trayData;
+// Find first empty slot (0)
+const emptyIdx = tray.indexOf(0);
+
+if (emptyIdx !== -1) {
+  tray[emptyIdx] = 1; // Set to OK
+  log("Filled slot " + emptyIdx);
+} else {
+  log("Tray is full!", "WARNING");
+}
+variables.trayData = [...tray]; // Trigger React update
+`
+    },
+    {
+      id: 'scr_reset',
+      name: 'ResetTray',
+      lastModified: Date.now(),
+      content: `log("Resetting all tray data...");
+variables.trayData = Array(20).fill(0);
+variables.robotActive = false;
+log("Reset Complete", "SUCCESS");
+`
+    }
+  ],
+  uiWidgets: [
+    { 
+      id: 'w1', 
+      type: 'TRAY', 
+      label: 'Input Tray A', 
+      variableName: 'trayData',
+      x: 0, y: 0, w: 2, h: 3,
+      rows: 5, cols: 4
+    },
+    {
+        id: 'w_btn_add',
+        type: 'BUTTON',
+        label: 'Add Part (Script)',
+        x: 2, y: 0, w: 1, h: 1,
+        events: { onClick: 'scr_fill' }
+    },
+    {
+        id: 'w_btn_rst',
+        type: 'BUTTON',
+        label: 'Reset All (Script)',
+        x: 3, y: 0, w: 1, h: 1,
+        events: { onClick: 'scr_reset' }
+    },
+    {
+        id: 'w3',
+        type: 'INDICATOR',
+        label: 'Robot Arm',
+        variableName: 'robotActive',
+        x: 2, y: 1, w: 1, h: 1
+    }
+  ],
+  variables: {
+      trayData: Array(20).fill(0), // 5x4 = 20 slots
+      robotActive: false
+  }
+};
 
 const App: React.FC = () => {
-  const [code, setCode] = useState(INITIAL_CODE);
+  const [project, setProject] = useState<AutomationProject>(INITIAL_PROJECT);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [showAI, setShowAI] = useState(true);
@@ -56,6 +101,8 @@ const App: React.FC = () => {
     port: 502,
     slaveId: 1
   });
+
+  const runnerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const addLog = (message: string, level: LogLevel = LogLevel.INFO) => {
     const newLog: LogEntry = {
@@ -67,100 +114,182 @@ const App: React.FC = () => {
     setLogs(prev => [...prev, newLog]);
   };
 
-  const handleRun = () => {
-    if (isRunning) return;
-    setIsRunning(true);
-    setLogs([]); // Clear previous logs
-    
-    addLog("Build started...", LogLevel.INFO);
-    
-    // Check API Key for AI features (optional but good practice to show integration)
-    if (window.aistudio) {
-        window.aistudio.hasSelectedApiKey().then(hasKey => {
-            if(!hasKey) {
-                addLog("Warning: No AI Studio API Key selected. AI features disabled.", LogLevel.WARNING);
+  // --- Script Engine ---
+  const executeScript = (scriptId: string, contextVars: Record<string, any>) => {
+      const script = project.scripts.find(s => s.id === scriptId);
+      if (!script) {
+          addLog(`Script ID ${scriptId} not found`, LogLevel.ERROR);
+          return;
+      }
+
+      try {
+          // Create a safe-ish function wrapper
+          // We pass 'variables' by reference so script can modify them
+          const func = new Function('variables', 'log', 'modbus', script.content);
+          
+          func(
+              contextVars, 
+              (msg: string, levelStr?: string) => {
+                   const lvl = levelStr === 'ERROR' ? LogLevel.ERROR : 
+                               levelStr === 'WARNING' ? LogLevel.WARNING : 
+                               levelStr === 'SUCCESS' ? LogLevel.SUCCESS : LogLevel.INFO;
+                   addLog(msg, lvl);
+              },
+              { ...modbusConfig } // Mock modbus access
+          );
+      } catch (e: any) {
+          addLog(`Script Error [${script.name}]: ${e.message}`, LogLevel.ERROR);
+      }
+  };
+
+  // --- Runtime Engine ---
+  const executeStep = async (step: LogicStep, vars: Record<string, any>) => {
+    switch(step.type) {
+      case 'MODBUS_READ':
+        // Simulation: Just a placeholder in this version as Scripts are doing the heavy lifting
+        break;
+      
+      case 'MODBUS_WRITE':
+        addLog(`[MODBUS] Writing ${step.params.value} to Address ${step.params.address}`, LogLevel.SUCCESS);
+        break;
+
+      case 'LOG':
+        let msg = step.params.message || '';
+        Object.keys(vars).forEach(key => {
+            if (typeof vars[key] !== 'object') {
+                msg = msg.replace(`{${key}}`, vars[key]);
             }
         });
+        addLog(msg, LogLevel.INFO);
+        break;
+
+      case 'DELAY':
+        await new Promise(r => setTimeout(r, step.params.ms || 500));
+        break;
+
+      case 'SCRIPT_CALL':
+          if (step.params.scriptId) {
+              executeScript(step.params.scriptId, vars);
+          }
+          break;
     }
-
-    setTimeout(() => {
-        addLog("Build succeeded. Starting runtime...", LogLevel.SUCCESS);
-        addLog(`Connecting to ${modbusConfig.ipAddress}:${modbusConfig.port} (Slave ID: ${modbusConfig.slaveId})...`, LogLevel.INFO);
-        
-        // Simulation Logic
-        setTimeout(() => {
-            // Randomly succeed or fail based on config "simulation"
-            if (Math.random() > 0.1) {
-                addLog("Connection established.", LogLevel.SUCCESS);
-                addLog("Reading Holding Registers [Start: 100, Count: 5]...", LogLevel.INFO);
-                
-                // Simulate data
-                for(let i=0; i<5; i++) {
-                    const val = Math.floor(Math.random() * 65535);
-                    addLog(`Register ${100 + i}: ${val}`, LogLevel.INFO);
-                }
-                addLog("Execution finished successfully.", LogLevel.SUCCESS);
-            } else {
-                addLog("Connection timed out. Target machine actively refused connection.", LogLevel.ERROR);
-            }
-            setIsRunning(false);
-        }, 1500);
-
-    }, 800);
   };
 
-  const handleStop = () => {
+  const runEngineLoop = async () => {
     if (!isRunning) return;
-    addLog("Execution terminated by user.", LogLevel.WARNING);
-    setIsRunning(false);
+
+    // Execute one full pass of the Logic Steps
+    const currentVars = { ...project.variables };
+    
+    for (const step of project.logicSteps) {
+      if (!isRunning) break; // Check interrupt
+      await executeStep(step, currentVars);
+    }
+
+    // Update Project State with new Variable values (to update UI)
+    setProject(prev => ({ ...prev, variables: currentVars }));
+    
+    // Loop again if still running
+    if (isRunning) {
+        runnerRef.current = setTimeout(() => runEngineLoop(), 100); 
+    }
   };
 
-  // Helper to open API key selector if needed
+  // Start/Stop Handler
   useEffect(() => {
-    const checkKey = async () => {
-        if(window.aistudio) {
-            const hasKey = await window.aistudio.hasSelectedApiKey();
-            if(!hasKey) {
-                // Don't force open, just leave a button or hint
-            }
-        }
+    if (isRunning) {
+      addLog("System Started.", LogLevel.SUCCESS);
+      runEngineLoop();
+    } else {
+      if (runnerRef.current) clearTimeout(runnerRef.current);
+      addLog("System Stopped.", LogLevel.WARNING);
     }
-    checkKey();
-  }, []);
+    return () => {
+      if (runnerRef.current) clearTimeout(runnerRef.current);
+    };
+  }, [isRunning]);
+
+  const handleRun = () => setIsRunning(true);
+  const handleStop = () => setIsRunning(false);
+
+  // Manual Trigger (e.g. from UI Button click)
+  const handleManualScriptRun = (scriptId: string) => {
+      const currentVars = { ...project.variables };
+      executeScript(scriptId, currentVars);
+      setProject(prev => ({ ...prev, variables: currentVars }));
+  };
+
+  // --- Builder Helpers ---
+  const handleAddStep = (type: StepType) => {
+    const newStep: LogicStep = {
+        id: Math.random().toString(36).substr(2, 9),
+        type,
+        name: `New ${type}`,
+        params: {}
+    };
+    
+    // Set default params
+    if (type === 'MODBUS_READ') newStep.params = { address: 0, count: 1, storeToVar: 'var1' };
+    if (type === 'DELAY') newStep.params = { ms: 1000 };
+    if (type === 'LOG') newStep.params = { message: 'Value is {var1}' };
+
+    setProject(prev => ({
+        ...prev,
+        logicSteps: [...prev.logicSteps, newStep]
+    }));
+  };
+
+  const handleAddWidget = (type: WidgetType) => {
+      const newWidget: React.ComponentProps<any> = { 
+          id: Math.random().toString(36).substr(2, 9),
+          type,
+          label: `New ${type}`,
+          x: 0, y: 0, w: 2, h: 2,
+          variableName: ''
+      };
+
+      if (type === 'TRAY') {
+          newWidget.w = 2;
+          newWidget.h = 3;
+          newWidget.rows = 5;
+          newWidget.cols = 4;
+          newWidget.variableName = 'trayData'; // default bind
+      }
+
+      setProject(prev => ({
+          ...prev,
+          uiWidgets: [...prev.uiWidgets, newWidget]
+      }));
+  };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden text-gray-200">
-      {/* Sidebar */}
       <Sidebar 
         isRunning={isRunning} 
         onRun={handleRun} 
         onStop={handleStop}
         config={modbusConfig}
         onConfigChange={setModbusConfig}
+        onAddStep={handleAddStep}
+        onAddWidget={handleAddWidget}
       />
 
-      {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
-        
-        {/* Top Bar for Main Area (Optional: Breadcrumbs or Tabs) */}
-        
-        {/* Workspace Split (Editor + AI/Tools) */}
         <div className="flex-1 flex overflow-hidden">
-          
-          {/* Editor Container */}
           <div className="flex-1 flex flex-col min-w-0">
-            <Editor 
-              code={code} 
-              onChange={setCode} 
-              fileName="Program.cs"
+            {/* Main Visual Editor */}
+            <VisualEditor 
+              project={project}
+              onUpdateProject={(p) => setProject(prev => ({...prev, ...p}))}
+              readOnly={isRunning}
+              onRunScript={handleManualScriptRun}
             />
-            {/* Console Panel (Bottom 30%) */}
-            <div className="h-[30%] min-h-[150px]">
+            
+            <div className="h-[25%] min-h-[150px]">
               <Console logs={logs} onClear={() => setLogs([])} />
             </div>
           </div>
 
-          {/* AI Assistant Toggle Button (if hidden) */}
           {!showAI && (
              <button 
                 onClick={() => setShowAI(true)}
@@ -168,35 +297,45 @@ const App: React.FC = () => {
                 title="Open AI Assistant"
              >
                 <PanelRightOpen size={20} className="text-gray-400" />
-                <span className="writing-vertical-lr text-xs text-gray-500 uppercase tracking-widest rotate-180">AI Copilot</span>
+                <span className="writing-vertical-lr text-xs text-gray-500 uppercase tracking-widest rotate-180">AI Architect</span>
              </button>
           )}
 
-          {/* AI Panel */}
           <AIAssistant 
             visible={showAI} 
             onClose={() => setShowAI(false)}
-            currentCode={code}
-            onCodeGenerated={(newCode) => {
-                // Clean up markdown block if present
-                let cleanCode = newCode.replace(/```csharp/g, '').replace(/```/g, '').trim();
-                setCode(cleanCode);
+            currentProject={project}
+            onConfigGenerated={(config) => {
+                setProject(prev => ({
+                    ...prev,
+                    logicSteps: config.logicSteps || prev.logicSteps,
+                    scripts: config.scripts ? [...prev.scripts, ...config.scripts] : prev.scripts,
+                    uiWidgets: config.uiWidgets || prev.uiWidgets,
+                    variables: {
+                        ...prev.variables,
+                        // Initialize any bound variables for new trays
+                        ...(config.uiWidgets || []).reduce((acc, w) => {
+                            if (w.type === 'TRAY' && w.variableName) {
+                                acc[w.variableName] = Array((w.rows || 3) * (w.cols || 3)).fill(0);
+                            }
+                            return acc;
+                        }, {} as Record<string, any>)
+                    }
+                }));
             }}
           />
         </div>
       </div>
       
-      {/* Floating Action Button for API Key (if necessary, though usually handled by browser extension context, adding explicit button per instructions) */}
-      <div className="fixed bottom-4 right-4 z-50">
+       <div className="fixed bottom-4 right-4 z-50">
         <button 
-            onClick={() => window.aistudio?.openSelectKey()}
+            onClick={() => (window as any).aistudio?.openSelectKey()}
             className="bg-blue-600 hover:bg-blue-500 text-white p-2 rounded-full shadow-lg opacity-50 hover:opacity-100 transition-all text-xs font-bold"
             title="Configure API Key"
         >
             KEY
         </button>
       </div>
-
     </div>
   );
 };
